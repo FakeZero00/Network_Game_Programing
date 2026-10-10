@@ -4,14 +4,16 @@
 #include <iostream>
 using namespace std;
 
-char* SERVERIP = (char*)"116.36.156.99";
+char* SERVERIP; //= (char*)"116.36.156.99";
 #define SERVERPORT 25565
 #define BUFFER_SIZE 1024	//1KB
 
 int main(int argc, char* argv[]) {
+	SERVERIP = argv[1];
+
 	//원하는 파일 읽기
 	char filename[256];
-	strcpy(filename, argv[1]);
+	strcpy(filename, argv[2]);
 	//////////////////파일 읽기//////////////////
 	ifstream file{ filename, ios::binary | ios::ate };
 	if (!file.is_open()) {
