@@ -5,7 +5,7 @@
 #include <windows.h>
 using namespace std;
 
-#define SERVER_PORT 25565
+#define SERVER_PORT 8080
 #define BUFFER_SIZE 1024	//1KB
 
 //烙拌康开 按眉 积己

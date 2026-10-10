@@ -4,8 +4,8 @@
 #include <iostream>
 using namespace std;
 
-char* SERVERIP; //= (char*)"116.36.156.99";
-#define SERVERPORT 25565
+char* SERVERIP;
+#define SERVERPORT 8080
 #define BUFFER_SIZE 1024	//1KB
 
 int main(int argc, char* argv[]) {
