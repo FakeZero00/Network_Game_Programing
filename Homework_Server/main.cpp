@@ -2,12 +2,129 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
+#include <windows.h>
 using namespace std;
 
-#define SERVER_PORT 9000
+#define SERVER_PORT 25565
+#define BUFFER_SIZE 1024	//1KB
+
+//임계영역 객체 생성
+CRITICAL_SECTION cs;
+
+//콘솔의 가장 아래쪽 커서 위치를 저장하는 변수
+CONSOLE_SCREEN_BUFFER_INFO csbi;
+
+void PrintProgress(SHORT y_pos, char* clientAddr, float percent) {
+	HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+
+	EnterCriticalSection(&cs);
+	GetConsoleScreenBufferInfo(hConsole, &csbi);
+	COORD currentPos = csbi.dwCursorPosition;
+	//커서를 가장 아래쪽으로 이동
+	COORD printPos = { 0, y_pos };
+	SetConsoleCursorPosition(hConsole, printPos);
+	cout << fixed;
+	cout.precision(2);
+	cout << "\r" << "[" << clientAddr << "] 클라이언트 수신 진행률: " << percent << "%" << flush;
+	//커서를 원래 위치로 되돌림
+	SetConsoleCursorPosition(hConsole, currentPos);
+	LeaveCriticalSection(&cs);
+}
+
+DWORD WINAPI ProcessClient(LPVOID arg) {
+	SOCKET client_sock = (SOCKET)arg;
+	struct sockaddr_in clientaddr;
+	int addrlen;
+	int retval;		//에러 체크용 변수
+	HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+	CONSOLE_SCREEN_BUFFER_INFO logCursor;
+	SHORT row;
+
+	addrlen = sizeof(clientaddr);
+	char addr[INET_ADDRSTRLEN];
+	getpeername(client_sock, (struct sockaddr*)&clientaddr, &addrlen);
+	inet_ntop(AF_INET, &clientaddr.sin_addr, addr, sizeof(addr));
+	
+	//데이터 송수신에 사용할 변수
+	vector<char> buffer;
+	long long fileLen;
+	char filename[256];
+
+	//파일 이름 수신
+	EnterCriticalSection(&cs);
+
+
+	retval = recv(client_sock, (char*)filename, sizeof(char) * 256, MSG_WAITALL);
+	if (retval == SOCKET_ERROR) {
+		err_display("recv()");
+		closesocket(client_sock);
+		return 1;
+	}
+	cout << "파일 이름 수신 성공: " << filename << endl;
+
+	//파일 사이즈 수신
+	retval = recv(client_sock, (char*)&fileLen, sizeof(long long), MSG_WAITALL);
+	if (retval == SOCKET_ERROR) {
+		err_display("recv()");
+		closesocket(client_sock);
+		return 1;
+	}
+	cout << "파일 사이즈 수신 성공: " << fileLen << " bytes" << endl;
+	LeaveCriticalSection(&cs);
+
+	buffer.resize(fileLen); //버퍼 크기 예약
+
+	//수신 진행률 출력할 커서 위치 저장
+	EnterCriticalSection(&cs);
+	GetConsoleScreenBufferInfo(hConsole, &logCursor);
+	row = logCursor.dwCursorPosition.Y;
+	COORD logPosDown = { 0, row + 1 };
+	SetConsoleCursorPosition(hConsole, logPosDown);
+	LeaveCriticalSection(&cs);
+
+	//실제 데이터 수신
+	int totalReceived = 0;
+	while (totalReceived < fileLen) {
+		//수신할 데이터 크기 수신
+		int len;
+		retval = recv(client_sock, (char*)&len, sizeof(int), MSG_WAITALL);
+		if (retval == SOCKET_ERROR) {
+			err_display("recv()");
+			return 1;
+		}
+		else if (retval == 0) return 1;
+
+		//수신한 데이터 크기만큼 버퍼에 추가
+		retval = recv(client_sock, buffer.data() + totalReceived, len, MSG_WAITALL);
+		if (retval == SOCKET_ERROR) {
+			err_display("recv()");
+			return 1;
+		}
+		else if (retval == 0) return 1;
+
+		totalReceived += len;
+		
+		PrintProgress(row, addr, (float)totalReceived / fileLen * 100);
+	}
+
+	//수신한 데이터 출력
+	ofstream outFile(filename, ios::binary);
+	if (!outFile.is_open()) {
+		err_display("파일을 작성할 수 없습니다.");
+		return 1;
+	}
+	EnterCriticalSection(&cs);
+	outFile.write(buffer.data(), buffer.size());
+	outFile.close();
+	cout << "파일 저장 완료." << endl;
+	LeaveCriticalSection(&cs);
+	
+	return 0;
+}
 
 int main(int argc, char* argv[])
 {
+	HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
 	int retval;
 	bool isLoop = true;
 
@@ -36,9 +153,14 @@ int main(int argc, char* argv[])
 	SOCKET client_sock;
 	struct sockaddr_in clientaddr;
 	int addrlen;
+	HANDLE hTread;
 
-	while (isLoop)
-	{
+	InitializeCriticalSection(&cs);
+
+	while (isLoop) {
+		EnterCriticalSection(&cs);
+		cout << "클라이언트 접속 대기 중..." << endl;
+		LeaveCriticalSection(&cs);
 		//accept()
 		addrlen = sizeof(clientaddr);
 		client_sock = accept(listen_sock, (struct sockaddr*)&clientaddr, &addrlen);
@@ -48,91 +170,24 @@ int main(int argc, char* argv[])
 		}
 
 		//클라이언트 정보 출력
+		addrlen = sizeof(clientaddr);
 		char addr[INET_ADDRSTRLEN];
 		inet_ntop(AF_INET, &clientaddr.sin_addr, addr, sizeof(addr));
+		EnterCriticalSection(&cs);
 		cout << "클라이언트 접속: " << addr << ":" << ntohs(clientaddr.sin_port) << endl;
+		LeaveCriticalSection(&cs);
 
-		//파일 이름 받기
-		char filename[256];
-		retval = recv(client_sock, filename, 256, MSG_WAITALL);
-		if (retval == SOCKET_ERROR) {
-			err_display("recv()");
-			break;
+		//클라이언트 처리 스레드 생성
+		hTread = CreateThread(NULL, 0, ProcessClient, (LPVOID)client_sock, 0, NULL);
+		if (hTread == NULL) {
+			err_display("CreateThread()");
+			closesocket(client_sock);
 		}
-		else if (retval == 0) {
-			cout << "클라이언트가 연결을 종료했습니다." << endl;
-			break;
-		}
-		//filename[retval] = '\0';
-		cout << "수시한 파일 이름: " << filename << endl;
-
-		//////////////////파일 읽기//////////////////
-		ifstream file{ filename, ios::binary | ios::ate };
-		if (!file.is_open()) err_quit("파일을 열 수 없습니다.");
-
-		//파일 사이즈 확인
-		streamsize size = file.tellg();
-
-		//파일 포인터를 처음으로 이동
-		file.seekg(0);
-
-		//파일 내용을 읽어오기
-		vector<char> buffer(size);
-		if (!file.read(buffer.data(), size)) {
-			cerr << "파일 읽기에 실패했습니다." << endl;
-			return 1;
-		}
-
-		file.close();
-		/////////////////////////////////////
-		long long fileLen = size;	//파일 사이즈
-
-		//클라이언트와 데이터 통신
-		//전체 파일 크기 송신
-		retval = send(client_sock, (char*)&fileLen, sizeof(long long), 0);
-		if (retval == SOCKET_ERROR) {
-			cout << "파일 사이즈 전송 실패" << endl;
-			err_display("send()");
-			break;
-		}
-		cout << "파일 사이즈 전송 성공: " << fileLen << " bytes" << endl;
-
-		const int CHUNK_SIZE = 4096; //4KB씩 전송
-		int totalSent = 0;
-
-		while (totalSent < fileLen){
-			//송신할 데이터 길이(고정 길이 송신)
-			int len = min(CHUNK_SIZE, fileLen - totalSent);
-
-			//고정 길이 송신
-			retval = send(client_sock, (char*)&len, sizeof(int), 0);
-			if (retval == SOCKET_ERROR) {
-				cout << "파일 내용 전송 실패" << endl;
-				err_display("send()");
-				break;
-			}
-
-			//가변 길이 송신
-			retval = send(client_sock, (char*)buffer.data() + totalSent, len, 0);
-			if (retval == SOCKET_ERROR) {
-				cout << "파일 내용 전송 실패" << endl;
-				err_display("send()");
-				break;
-			}
-
-			totalSent += len;
-			cout << fixed;
-			cout.precision(2);
-			cout << "\r전송 진행률: " << (double)totalSent / fileLen * 100 << "%" << flush;
-			if (totalSent == fileLen) {
-				cout << endl;
-				cout << "파일 내용 전송 완료" << endl;
-				isLoop = false;
-			}
-		}
-		closesocket(client_sock);
+		else CloseHandle(hTread);
 	}
 
+	DeleteCriticalSection(&cs);
 	closesocket(listen_sock);
+	WSACleanup();
 	system("pause");
 }

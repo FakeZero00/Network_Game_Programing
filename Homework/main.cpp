@@ -4,10 +4,37 @@
 #include <iostream>
 using namespace std;
 
-char* SERVERIP = (char*)"210.93.56.16";
-#define SERVERPORT 9000
+char* SERVERIP = (char*)"116.36.156.99";
+#define SERVERPORT 25565
+#define BUFFER_SIZE 1024	//1KB
 
 int main(int argc, char* argv[]) {
+	//원하는 파일 읽기
+	char filename[256];
+	strcpy(filename, argv[1]);
+	//////////////////파일 읽기//////////////////
+	ifstream file{ filename, ios::binary | ios::ate };
+	if (!file.is_open()) {
+		err_display("파일을 열 수 없습니다.");
+		return 1;
+	}
+
+	//파일 사이즈 확인
+	streamsize size = file.tellg();
+
+	//파일 포인터를 처음으로 이동
+	file.seekg(0);
+
+	//파일 내용을 읽어오기
+	vector<char> buffer(size);
+	if (!file.read(buffer.data(), size)) {
+		cerr << "파일 읽기에 실패했습니다." << endl;
+		err_display("file.read()");
+		return 1;
+	}
+
+	file.close();
+	/////////////////////////////////////
 	int retval;
 
 	//윈속 초기화
@@ -28,62 +55,65 @@ int main(int argc, char* argv[]) {
 	retval = connect(sock, (struct sockaddr*)&serveraddr, sizeof(serveraddr));
 	if (retval == SOCKET_ERROR) err_quit("connect()");
 
-	//원하는 파일명 전송
-	char filename[256];
-	strcpy(filename, argv[1]);
-	retval = send(sock, filename, 256, 0);
-	if (retval == SOCKET_ERROR) err_quit("send()");
-
-	//데이터 송수신에 사용할 변수
-	vector<char> buffer;
-	long long fileLen;
-
-	//파일 사이즈 수신
-	retval = recv(sock, (char*)&fileLen, sizeof(long long), MSG_WAITALL);
+	//통신 시작
+	retval = send(sock, (char*)&filename, sizeof(char) * 256, 0);
 	if (retval == SOCKET_ERROR) {
-		err_display("recv()");
+		cout << "파일 이름 전송 실패" << endl;
+		err_display("send()");
+		closesocket(sock);
 		return 1;
 	}
-	cout << "파일 사이즈 수신 성공: " << fileLen << " bytes" << endl;
+	cout << "파일 이름 전송 성공: " << filename << endl;
 
-	buffer.resize(fileLen); //버퍼 크기 예약
-	//실제 데이터 수신
-	int totalReceived = 0;
-	while (totalReceived < fileLen) {
-		//수신할 데이터 크기 수신
-		int len;
-		retval = recv(sock, (char*)&len, sizeof(int), MSG_WAITALL);
+	long long fileLen = size;	//파일 사이즈
+
+	//서버와 데이터 통신
+	//전체 파일 크기 송신
+	retval = send(sock, (char*)&fileLen, sizeof(long long), 0);
+	if (retval == SOCKET_ERROR) {
+		cout << "파일 사이즈 전송 실패" << endl;
+		err_display("send()");
+		closesocket(sock);
+		return 1;
+	}
+	cout << "파일 사이즈 전송 성공: " << fileLen << " bytes" << endl;
+
+	const int CHUNK_SIZE = BUFFER_SIZE;
+	int totalSent = 0;
+
+	while (totalSent < fileLen) {
+		//송신할 데이터 길이(고정 길이 송신)
+		int len = min(CHUNK_SIZE, fileLen - totalSent);
+
+		//고정 길이 송신
+		retval = send(sock, (char*)&len, sizeof(int), 0);
 		if (retval == SOCKET_ERROR) {
-			err_display("recv()");
-			return 1;
+			cout << "파일 내용 전송 실패" << endl;
+			err_display("send()");
+			closesocket(sock);
+			break;
 		}
-		else if (retval == 0) return 1;
 
-		//수신한 데이터 크기만큼 버퍼에 추가
-		retval = recv(sock, buffer.data() + totalReceived, len, MSG_WAITALL);
+		//가변 길이 송신
+		retval = send(sock, (char*)buffer.data() + totalSent, len, 0);
 		if (retval == SOCKET_ERROR) {
-			err_display("recv()");
-			return 1;
+			cout << "파일 내용 전송 실패" << endl;
+			err_display("send()");
+			closesocket(sock);
+			break;
 		}
-		else if (retval == 0) return 1;
 
-		totalReceived += len;
+		totalSent += len;
 		cout << fixed;
 		cout.precision(2);
-		cout << "\r수신 진행률: " << (double)totalReceived / fileLen * 100 << "%" << flush;
-	}
-	cout << endl;
-
-	//수신한 데이터 출력
-	ofstream outFile(filename, ios::binary);
-	if (!outFile.is_open()) {
-		err_display("파일을 작성할 수 없습니다.");
-		return 1;
+		cout << "\r전송 진행률: " << (double)totalSent / fileLen * 100 << "%" << flush;
+		if (totalSent == fileLen) {
+			cout << endl;
+			cout << "파일 내용 전송 완료" << endl;
+		}
 	}
 
-	outFile.write(buffer.data(), buffer.size());
-	outFile.close();
-	cout << "파일 저장 완료." << endl;
-
-	system("pause");
+	closesocket(sock);
+	WSACleanup();
+	return 0;
 }
